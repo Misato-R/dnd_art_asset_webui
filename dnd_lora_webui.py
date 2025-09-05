@@ -214,21 +214,36 @@ def sd_txt2img(url: str, prompt: str, negative: str, steps: int, cfg: float, sam
     return img, used_seed
 
 
-def sd_img2img(url: str, init_img: Image.Image, prompt: str, negative: str, steps: int, cfg: float,
-               sampler: str, denoise: float, seed: int):
-    buf = io.BytesIO(); init_img.save(buf, format="PNG")
+def sd_img2img(url: str, init_img: Image.Image, prompt: str, negative: str,
+               steps: int, cfg: float, sampler: str, denoise: float, seed: int):
+    buf = io.BytesIO()
+    init_img.save(buf, format="PNG")
+
+    # ★ 用上传图片的原始分辨率
+    w, h = init_img.size
+
     payload = {
         "init_images": [base64.b64encode(buf.getvalue()).decode()],
-        "prompt": prompt, "negative_prompt": negative or DEFAULT_NEG,
-        "steps": int(steps), "cfg_scale": float(cfg), "sampler_name": sampler,
-        "denoising_strength": float(denoise), "seed": int(seed),
+        "prompt": prompt,
+        "negative_prompt": negative or DEFAULT_NEG,
+        "steps": int(steps),
+        "cfg_scale": float(cfg),
+        "sampler_name": sampler,
+        "denoising_strength": float(denoise),
+        "seed": int(seed),
+
+        # ★ 明确传给后端：按原图尺寸做 img2img
+        "width": int(w),
+        "height": int(h),
     }
+
     r = requests.post(f"{url}/sdapi/v1/img2img", json=payload, timeout=300)
     r.raise_for_status()
     data = r.json()
     img = b64_to_pil(data["images"][0])
     used_seed = _extract_seed_from_info(data, seed)
     return img, used_seed
+
 
 # ===== XY Grid helpers =====
 import random
@@ -413,11 +428,26 @@ def gen_txt(sd_url, base_prompt, neg_prompt,
 def gen_img(sd_url, init_img, base_prompt, neg_prompt,
             race_key, race_w, class_key, class_w, armor_key, armor_w, char_key, char_w,
             steps, cfg, sampler, denoise, seed, model_title):
+    # 先切模型（可选）
     if model_title:
-        try: set_checkpoint(sd_url, model_title)
-        except Exception as e: print("[WARN] set_checkpoint:", e)
+        try:
+            set_checkpoint(sd_url, model_title)
+        except Exception as e:
+            print("[WARN] set_checkpoint:", e)
+
+    # 把 UI 值转成基础类型，避免把组件对象传进后端
+    steps   = int(steps)
+    cfg     = float(cfg)
+    denoise = float(denoise)
+    seed    = int(seed) if seed not in (None, "", "None") else -1
+
+    # 组提示词（复用你自己的 build_prompt）
     prompt = build_prompt(base_prompt, race_key, race_w, class_key, class_w, armor_key, armor_w, char_key, char_w)
-    img, used_seed = sd_txt2img(sd_url, prompt, neg_prompt, steps, cfg, sampler, width, height, seed)
+
+    # ★ 这里改成 img2img，而不是 txt2img；也不要再用外层的 width/height 变量
+    img, used_seed = sd_img2img(sd_url, init_img, prompt, neg_prompt, steps, cfg, sampler, denoise, seed)
+
+    # 用生成图的实际宽高写 meta
     meta_text = format_meta_text(sd_url, model_title, sampler, steps, cfg, used_seed, img.width, img.height, denoise)
     return img, prompt, meta_text
 
@@ -432,7 +462,7 @@ footer { display:none; }
 .g-char  { height: 220px; overflow: auto; }
 """
 with gr.Blocks(css=CSS) as demo:
-    gr.Markdown("# 🛡️ D&D LoRA WebUI — Race × Class × Armor × Character  \n*点击卡片选择 LoRA*")
+    gr.Markdown("# 🛡️ D&D LoRA WebUI — Race × Class × Armor × Character  \n*点击卡片选择pick card chose LoRA*")
 
     # 顶部：SD_URL + 测试 + 底模
     with gr.Row():
@@ -443,8 +473,8 @@ with gr.Blocks(css=CSS) as demo:
 
     with gr.Row():
         model_dd    = gr.Dropdown(choices=[], label="底模 (Checkpoint)", interactive=True, scale=4)
-        btn_refresh = gr.Button("刷新列表", scale=1)
-        btn_apply   = gr.Button("应用底模", scale=1)
+        btn_refresh = gr.Button("刷新列表 refrash", scale=1)
+        btn_apply   = gr.Button("应用底模 Application", scale=1)
         apply_msg   = gr.Markdown("")
 
     def _refresh_models(u):
@@ -460,7 +490,7 @@ with gr.Blocks(css=CSS) as demo:
         # ---------- TXT2IMG ----------
         with gr.Tab("Text → Image"):
             
-            with gr.Accordion("风格选择", open=False):
+            with gr.Accordion("风格选择 style", open=False):
                 with gr.Row():
                     steps   = gr.Slider(10, 80, value=36, step=1, label="Steps")
                     cfg     = gr.Slider(1.0, 12.0, value=4.5, step=0.5, label="CFG Scale")
@@ -513,11 +543,11 @@ with gr.Blocks(css=CSS) as demo:
                     char_gallery.select(fn=make_pick_label("character"), outputs=char_choice)
 
                 with gr.Column(scale=2):
-                    base_prompt = gr.Textbox(lines=5, label="提示词 (可追加外观/动作/场景)",
+                    base_prompt = gr.Textbox(lines=5, label="提示词 (可追加外观/动作/场景) prompt",
                         value=DEFAULT_PROMPT,
                         placeholder="e.g., elegant hand pose, separated fingers, dramatic lighting")
-                    neg_prompt = gr.Textbox(lines=3, label="负面提示词", value=DEFAULT_NEG)
-                    with gr.Accordion("调参 (可选)", open=False):
+                    neg_prompt = gr.Textbox(lines=3, label="负面提示词 negative", value=DEFAULT_NEG)
+                    with gr.Accordion("调参 (可选) parameters", open=False):
                         with gr.Row():
                             steps   = gr.Slider(10, 80, value=36, step=1, label="Steps")
                             cfg     = gr.Slider(1.0, 12.0, value=4.5, step=0.5, label="CFG Scale")
@@ -527,9 +557,9 @@ with gr.Blocks(css=CSS) as demo:
                             height = gr.Slider(512, 2048, value=1024, step=64, label="高")
                             seed   = gr.Number(value=-1, precision=0, label="Seed (-1 随机)")
                     btn_txt     = gr.Button("生成", variant="primary")
-                    out_img     = gr.Image(type="pil", label="结果")
-                    used_prompt = gr.Textbox(label="实际提示词 (含 LoRA 标记)")
-                    meta_md = gr.Markdown("", label="生成信息")
+                    out_img     = gr.Image(type="pil", label="结果 result")
+                    used_prompt = gr.Textbox(label="实际提示词 prompt(含 LoRA 标记)")
+                    meta_md = gr.Markdown("", label="生成信息 info")
                 
                 with gr.Accordion("X/Y 组图（可选）", open=False):
                     with gr.Row():
@@ -563,7 +593,7 @@ with gr.Blocks(css=CSS) as demo:
         # ---------- IMG2IMG ----------
         with gr.Tab("Image → Image"):
             
-            with gr.Accordion("风格选择", open=False):
+            with gr.Accordion("风格选择 style", open=False):
                 with gr.Row():
                     steps2   = gr.Slider(10, 80, value=36, step=1, label="Steps")
                     cfg2     = gr.Slider(1.0, 12.0, value=4.5, step=0.5, label="CFG Scale")
@@ -612,9 +642,9 @@ with gr.Blocks(css=CSS) as demo:
 
                 with gr.Column(scale=2):
                     init_img     = gr.Image(type="pil", label="初始图像 (img2img)")
-                    base_prompt2 = gr.Textbox(lines=5, label="提示词 (追加改动点)", value=DEFAULT_PROMPT)
-                    neg_prompt2  = gr.Textbox(lines=3, label="负面提示词", value=DEFAULT_NEG)
-                    with gr.Accordion("调参 (可选)", open=False):
+                    base_prompt2 = gr.Textbox(lines=5, label="提示词 (追加改动点) prompt", value=DEFAULT_PROMPT)
+                    neg_prompt2  = gr.Textbox(lines=3, label="负面提示词 negative", value=DEFAULT_NEG)
+                    with gr.Accordion("调参 (可选) parameters", open=False):
                         with gr.Row():
                             steps2   = gr.Slider(10, 80, value=36, step=1, label="Steps")
                             cfg2     = gr.Slider(1.0, 12.0, value=4.5, step=0.5, label="CFG Scale")
@@ -622,10 +652,10 @@ with gr.Blocks(css=CSS) as demo:
                         with gr.Row():
                             denoise = gr.Slider(0.1, 0.95, value=0.45, step=0.01, label="Denoising Strength")
                             seed2   = gr.Number(value=-1, precision=0, label="Seed (-1 随机)")
-                    btn_img      = gr.Button("重绘", variant="primary")
-                    out_img2     = gr.Image(type="pil", label="结果")
-                    used_prompt2 = gr.Textbox(label="实际提示词 (含 LoRA 标记)")
-                    meta_md2 = gr.Markdown("", label="生成信息")
+                    btn_img      = gr.Button("重绘 regenerate", variant="primary")
+                    out_img2     = gr.Image(type="pil", label="结果 result")
+                    used_prompt2 = gr.Textbox(label="实际提示词 prompt (含 LoRA 标记)")
+                    meta_md2 = gr.Markdown("", label="生成信息 info")
 
             btn_img.click(
                 gen_img,
